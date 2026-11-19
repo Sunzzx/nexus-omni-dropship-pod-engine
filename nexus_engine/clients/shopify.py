@@ -122,6 +122,46 @@ class ShopifyClient:
         }
         return self._request("POST", "webhooks.json", payload)
 
+    def publish_blog_article(self, title: str, body_html: str, tags: List[str], author: str = "Nexus Editorial Team", blog_id: Optional[str] = None, handle: Optional[str] = None) -> Dict[str, Any]:
+        """Publishes an automated Programmatic SEO blog article to the Shopify store blog."""
+        bid = blog_id or "default"
+        payload = {
+            "article": {
+                "title": title,
+                "author": author,
+                "tags": ", ".join(tags),
+                "body_html": body_html,
+                "summary_html": f"<p>{title} — Comprehensive buyer guide & breakdown.</p>",
+                "published": True
+            }
+        }
+        if handle:
+            payload["article"]["handle"] = handle
+        res = self._request("POST", f"blogs/{bid}/articles.json", payload)
+        logger.info("Published SEO Article '%s' to Shopify Store", title)
+        return res
+
+    def create_discount_code(self, code: str, percentage_off: float = 15.0) -> Dict[str, Any]:
+        """Creates a programmatic discount code on Shopify for cart recovery or influencer campaigns."""
+        rule_payload = {
+            "price_rule": {
+                "title": f"Nexus Auto Discount {code}",
+                "target_type": "line_item",
+                "target_selection": "all",
+                "allocation_method": "across",
+                "value_type": "percentage",
+                "value": f"-{percentage_off:.1f}",
+                "customer_selection": "all",
+                "starts_at": "2026-01-01T00:00:00Z"
+            }
+        }
+        res = self._request("POST", "price_rules.json", rule_payload)
+        rule_id = res.get("price_rule", {}).get("id", "rule_mock_101")
+        code_payload = {"discount_code": {"code": code}}
+        code_res = self._request("POST", f"price_rules/{rule_id}/discount_codes.json", code_payload)
+        logger.info("Created Shopify Discount Code '%s' (%.1f%% off)", code, percentage_off)
+        return {"success": True, "code": code, "response": code_res}
+
     # ---------------- Simulation Mocking ----------------
 
     def _mock_response(self, method: str, endpoint: str, data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -156,5 +196,20 @@ class ShopifyClient:
                     "topic": data.get("webhook", {}).get("topic", "orders/create"),
                     "address": data.get("webhook", {}).get("address")
                 }
+            }
+        elif "articles.json" in endpoint:
+            art = data.get("article", {}) if data else {}
+            return {
+                "article": {
+                    "id": mock_id,
+                    "title": art.get("title", "SEO Article"),
+                    "handle": "seo-article-" + str(mock_id),
+                    "published": True
+                }
+            }
+        elif "price_rules" in endpoint:
+            return {
+                "price_rule": {"id": mock_id},
+                "discount_code": {"id": mock_id + 1, "code": data.get("discount_code", {}).get("code", "VIP15")}
             }
         return {"status": "ok", "mock_id": mock_id}

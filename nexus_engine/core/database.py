@@ -1,6 +1,6 @@
 """
 Durable SQLite ledger for Nexus Dropship & POD Engine.
-Manages persistent catalog mapping, order histories, fulfillments, and audit logs.
+Manages persistent multi-store catalogs, order histories, fulfillments, SEO articles, and creative growth assets.
 """
 
 from __future__ import annotations
@@ -13,12 +13,17 @@ from typing import Any, Dict, List, Optional
 from nexus_engine.config import DATA_DIR
 from nexus_engine.models import (
     CatalogProduct,
+    CreativePack,
     CustomerOrder,
     FulfillmentRecord,
     FulfillmentStatus,
+    InfluencerOutreach,
     OrderItem,
+    PlatformType,
     ProductVariant,
+    SEOArticle,
     ShippingAddress,
+    StoreConfig,
     SupplierType,
 )
 
@@ -28,18 +33,33 @@ DB_PATH = DATA_DIR / "nexus_ledger.db"
 class NexusDatabase:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self.db_path), timeout=30.0, check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
+        return self._conn
 
     def _init_db(self) -> None:
         with self._get_conn() as conn:
             conn.executescript("""
+            CREATE TABLE IF NOT EXISTS stores (
+                store_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                shop_url TEXT NOT NULL,
+                access_token TEXT,
+                target_niche TEXT,
+                currency TEXT DEFAULT 'USD',
+                is_active INTEGER DEFAULT 1,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS products (
                 product_id TEXT PRIMARY KEY,
                 shopify_product_id TEXT,
@@ -49,6 +69,7 @@ class NexusDatabase:
                 product_type TEXT,
                 supplier_type TEXT NOT NULL,
                 supplier_product_id TEXT NOT NULL,
+                target_store_id TEXT,
                 data_json TEXT NOT NULL,
                 is_published INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
@@ -69,6 +90,7 @@ class NexusDatabase:
 
             CREATE TABLE IF NOT EXISTS orders (
                 order_id TEXT PRIMARY KEY,
+                store_id TEXT,
                 shopify_order_id TEXT UNIQUE NOT NULL,
                 shopify_order_number TEXT NOT NULL,
                 customer_email TEXT,
@@ -98,6 +120,38 @@ class NexusDatabase:
                 FOREIGN KEY (order_id) REFERENCES orders(order_id)
             );
 
+            CREATE TABLE IF NOT EXISTS seo_articles (
+                article_id TEXT PRIMARY KEY,
+                store_id TEXT NOT NULL,
+                product_id TEXT,
+                title TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                target_keywords TEXT,
+                meta_description TEXT,
+                body_html TEXT NOT NULL,
+                json_ld_schema TEXT,
+                published_url TEXT,
+                is_published INTEGER DEFAULT 0,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS creative_packs (
+                pack_id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                product_title TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS influencer_campaigns (
+                campaign_id TEXT PRIMARY KEY,
+                niche TEXT NOT NULL,
+                influencer_tier TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS supplier_audit_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
@@ -110,6 +164,58 @@ class NexusDatabase:
             );
             """)
 
+            # Auto-migrate columns if table already existed prior to multi-store/growth expansion
+            try:
+                conn.execute("ALTER TABLE products ADD COLUMN target_store_id TEXT;")
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                conn.execute("ALTER TABLE orders ADD COLUMN store_id TEXT;")
+            except sqlite3.OperationalError:
+                pass
+
+    # ---------------- Multi-Store Operations ----------------
+
+    def save_store(self, store: StoreConfig) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO stores (
+                    store_id, name, platform, shop_url, access_token,
+                    target_niche, currency, is_active, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    store.store_id,
+                    store.name,
+                    store.platform.value,
+                    store.shop_url,
+                    store.access_token,
+                    store.target_niche,
+                    store.currency,
+                    1 if store.is_active else 0,
+                    store.model_dump_json(),
+                    store.created_at,
+                ),
+            )
+
+    def get_store(self, store_id: str) -> Optional[StoreConfig]:
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT data_json FROM stores WHERE store_id = ?", (store_id,)).fetchone()
+            if row:
+                return StoreConfig.model_validate_json(row["data_json"])
+        return None
+
+    def list_stores(self, active_only: bool = False) -> List[StoreConfig]:
+        with self._get_conn() as conn:
+            q = "SELECT data_json FROM stores"
+            if active_only:
+                q += " WHERE is_active = 1"
+            q += " ORDER BY created_at ASC"
+            rows = conn.execute(q).fetchall()
+            return [StoreConfig.model_validate_json(r["data_json"]) for r in rows]
+
     # ---------------- Product Operations ----------------
 
     def save_product(self, product: CatalogProduct) -> None:
@@ -119,8 +225,8 @@ class NexusDatabase:
                 INSERT OR REPLACE INTO products (
                     product_id, shopify_product_id, title, handle, vendor,
                     product_type, supplier_type, supplier_product_id,
-                    data_json, is_published, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    target_store_id, data_json, is_published, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     product.product_id,
@@ -131,6 +237,7 @@ class NexusDatabase:
                     product.product_type,
                     product.supplier_type.value,
                     product.supplier_product_id,
+                    product.target_store_id,
                     product.model_dump_json(),
                     1 if product.is_published else 0,
                     product.created_at,
@@ -179,9 +286,15 @@ class NexusDatabase:
                 return dict(row)
         return None
 
-    def list_products(self, limit: int = 100) -> List[CatalogProduct]:
+    def list_products(self, limit: int = 100, store_id: Optional[str] = None) -> List[CatalogProduct]:
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT data_json FROM products ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            if store_id:
+                rows = conn.execute(
+                    "SELECT data_json FROM products WHERE target_store_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (store_id, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute("SELECT data_json FROM products ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [CatalogProduct.model_validate_json(r["data_json"]) for r in rows]
 
     # ---------------- Order Operations ----------------
@@ -191,13 +304,14 @@ class NexusDatabase:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO orders (
-                    order_id, shopify_order_id, shopify_order_number, customer_email,
+                    order_id, store_id, shopify_order_id, shopify_order_number, customer_email,
                     customer_name, total_revenue, total_cost, net_profit, status,
                     data_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     order.order_id,
+                    order.store_id,
                     order.shopify_order_id,
                     order.shopify_order_number,
                     order.customer_email,
@@ -218,9 +332,12 @@ class NexusDatabase:
                 return CustomerOrder.model_validate_json(row["data_json"])
         return None
 
-    def list_orders(self, limit: int = 100) -> List[CustomerOrder]:
+    def list_orders(self, limit: int = 100, store_id: Optional[str] = None) -> List[CustomerOrder]:
         with self._get_conn() as conn:
-            rows = conn.execute("SELECT data_json FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            if store_id:
+                rows = conn.execute("SELECT data_json FROM orders WHERE store_id = ? ORDER BY created_at DESC LIMIT ?", (store_id, limit)).fetchall()
+            else:
+                rows = conn.execute("SELECT data_json FROM orders ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
             return [CustomerOrder.model_validate_json(r["data_json"]) for r in rows]
 
     # ---------------- Fulfillment Operations ----------------
@@ -281,25 +398,115 @@ class NexusDatabase:
                 )
             return res
 
+    # ---------------- Growth: SEO & Marketing Assets ----------------
+
+    def save_seo_article(self, article: SEOArticle) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO seo_articles (
+                    article_id, store_id, product_id, title, slug,
+                    target_keywords, meta_description, body_html, json_ld_schema,
+                    published_url, is_published, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    article.article_id,
+                    article.store_id,
+                    article.product_id,
+                    article.title,
+                    article.slug,
+                    ", ".join(article.target_keywords),
+                    article.meta_description,
+                    article.body_html,
+                    article.json_ld_schema,
+                    article.published_url,
+                    1 if article.is_published else 0,
+                    article.model_dump_json(),
+                    article.created_at,
+                ),
+            )
+
+    def list_seo_articles(self, limit: int = 50) -> List[SEOArticle]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT data_json FROM seo_articles ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return [SEOArticle.model_validate_json(r["data_json"]) for r in rows]
+
+    def save_creative_pack(self, pack: CreativePack) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO creative_packs (
+                    pack_id, product_id, product_title, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    pack.pack_id,
+                    pack.product_id,
+                    pack.product_title,
+                    pack.model_dump_json(),
+                    pack.created_at,
+                ),
+            )
+
+    def list_creative_packs(self, limit: int = 50) -> List[CreativePack]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT data_json FROM creative_packs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return [CreativePack.model_validate_json(r["data_json"]) for r in rows]
+
+    def save_influencer_campaign(self, campaign: InfluencerOutreach) -> None:
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO influencer_campaigns (
+                    campaign_id, niche, influencer_tier, data_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    campaign.campaign_id,
+                    campaign.niche,
+                    campaign.influencer_tier,
+                    campaign.model_dump_json(),
+                    campaign.created_at,
+                ),
+            )
+
+    def list_influencer_campaigns(self, limit: int = 50) -> List[InfluencerOutreach]:
+        with self._get_conn() as conn:
+            rows = conn.execute("SELECT data_json FROM influencer_campaigns ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            return [InfluencerOutreach.model_validate_json(r["data_json"]) for r in rows]
+
     # ---------------- Metrics & Analytics ----------------
 
-    def get_financial_summary(self) -> Dict[str, Any]:
+    def get_financial_summary(self, store_id: Optional[str] = None) -> Dict[str, Any]:
         with self._get_conn() as conn:
+            where_clause = " WHERE store_id = ?" if store_id else ""
+            params = (store_id,) if store_id else ()
+
             row = conn.execute(
-                """
+                f"""
                 SELECT
                     COUNT(*) as total_orders,
                     COALESCE(SUM(total_revenue), 0) as gross_revenue,
                     COALESCE(SUM(total_cost), 0) as total_cogs,
                     COALESCE(SUM(net_profit), 0) as net_profit
-                FROM orders
-                """
+                FROM orders{where_clause}
+                """,
+                params,
             ).fetchone()
 
-            p_count = conn.execute("SELECT COUNT(*) as count FROM products").fetchone()["count"]
+            p_count = conn.execute(
+                f"SELECT COUNT(*) as count FROM products{' WHERE target_store_id = ?' if store_id else ''}",
+                params,
+            ).fetchone()["count"]
+
             f_active = conn.execute(
                 "SELECT COUNT(*) as count FROM fulfillments WHERE status IN ('pending', 'dispatched', 'in_production')"
             ).fetchone()["count"]
+
+            s_count = conn.execute("SELECT COUNT(*) as count FROM stores WHERE is_active = 1").fetchone()["count"]
+            articles_count = conn.execute("SELECT COUNT(*) as count FROM seo_articles").fetchone()["count"]
+            creatives_count = conn.execute("SELECT COUNT(*) as count FROM creative_packs").fetchone()["count"]
 
             gross = row["gross_revenue"]
             profit = row["net_profit"]
@@ -313,6 +520,9 @@ class NexusDatabase:
                 "profit_margin_pct": round(margin_pct, 1),
                 "total_products": p_count,
                 "active_fulfillments": f_active,
+                "active_stores": max(s_count, 1),
+                "seo_articles_published": articles_count,
+                "creative_packs_generated": creatives_count,
             }
 
 

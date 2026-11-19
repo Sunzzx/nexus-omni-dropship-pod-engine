@@ -1,6 +1,7 @@
 """
 FastAPI Server & Webhook Listener for Nexus Dropship & POD Engine.
-Handles incoming Shopify order webhooks, serves the operational dashboard, and exposes management APIs.
+Handles incoming Shopify order webhooks, serves the operational multi-store dashboard,
+and exposes autonomous growth, SEO, and viral marketing APIs.
 """
 
 from __future__ import annotations
@@ -11,25 +12,30 @@ import hmac
 import json
 import logging
 import uuid
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from nexus_engine.config import config
 from nexus_engine.core.database import db
 from nexus_engine.core.fulfillment_tracker import fulfillment_tracker
+from nexus_engine.core.growth_daemon import growth_daemon
+from nexus_engine.core.growth_engine import growth_engine
+from nexus_engine.core.multi_store_manager import multi_store_manager
 from nexus_engine.core.niche_scout import niche_scout
 from nexus_engine.core.order_router import order_router
+from nexus_engine.models import PlatformType, StoreConfig
 from nexus_engine.clients.shopify import ShopifyClient
 
 logger = logging.getLogger("nexus.server")
 
 app = FastAPI(
-    title="Nexus Omni-Dropship & POD Engine",
-    description="Autonomous Enterprise Dropshipping & Print-On-Demand Fulfillment System",
-    version="1.0.0",
+    title="Nexus Omni-Dropship & POD Growth Engine",
+    description="Autonomous Multi-Store Dropshipping & Print-On-Demand Fulfillment System",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -76,21 +82,75 @@ async def handle_shopify_order_webhook(
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-# ---------------- API Management Endpoints ----------------
+# ---------------- Multi-Store Endpoints ----------------
+
+class AddStoreRequest(BaseModel):
+    name: str
+    shop_url: str
+    target_niche: str
+    platform: str = "shopify"
+    access_token: str = ""
+    currency: str = "USD"
+
+
+@app.get("/api/stores")
+async def list_stores():
+    return [s.model_dump() for s in multi_store_manager.list_stores()]
+
+
+@app.post("/api/stores")
+async def add_store(req: AddStoreRequest):
+    platform_enum = PlatformType(req.platform.lower()) if req.platform.lower() in [p.value for p in PlatformType] else PlatformType.SHOPIFY
+    store = multi_store_manager.register_store(
+        name=req.name,
+        shop_url=req.shop_url,
+        target_niche=req.target_niche,
+        platform=platform_enum,
+        access_token=req.access_token,
+        currency=req.currency,
+    )
+    return {"status": "success", "store": store.model_dump()}
+
+
+# ---------------- Growth & Marketing Endpoints ----------------
+
+@app.post("/api/growth/execute")
+async def trigger_growth_cycle():
+    """Triggers the full multi-store expansion, product publishing, SEO, and ad generation cycle."""
+    summary = growth_daemon.execute_growth_cycle()
+    return {"status": "success", "summary": summary}
+
+
+@app.get("/api/seo-articles")
+async def get_seo_articles():
+    return [a.model_dump() for a in db.list_seo_articles(limit=25)]
+
+
+@app.get("/api/creative-packs")
+async def get_creative_packs():
+    return [c.model_dump() for c in db.list_creative_packs(limit=25)]
+
+
+@app.get("/api/influencers")
+async def get_influencers():
+    return [i.model_dump() for i in db.list_influencer_campaigns(limit=25)]
+
+
+# ---------------- Catalog & Order APIs ----------------
 
 @app.get("/api/metrics")
-async def get_metrics():
-    return db.get_financial_summary()
+async def get_metrics(store_id: Optional[str] = None):
+    return db.get_financial_summary(store_id=store_id)
 
 
 @app.get("/api/products")
-async def get_products():
-    return [p.model_dump() for p in db.list_products(limit=50)]
+async def get_products(store_id: Optional[str] = None):
+    return [p.model_dump() for p in db.list_products(limit=50, store_id=store_id)]
 
 
 @app.get("/api/orders")
-async def get_orders():
-    return [o.model_dump() for o in db.list_orders(limit=50)]
+async def get_orders(store_id: Optional[str] = None):
+    return [o.model_dump() for o in db.list_orders(limit=50, store_id=store_id)]
 
 
 @app.post("/api/catalog/seed")
@@ -176,15 +236,18 @@ async def simulate_order():
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_view():
     metrics = db.get_financial_summary()
-    orders = db.list_orders(limit=10)
-    products = db.list_products(limit=10)
+    stores = multi_store_manager.list_stores()
+    orders = db.list_orders(limit=8)
+    products = db.list_products(limit=8)
+    seo_articles = db.list_seo_articles(limit=5)
+    creatives = db.list_creative_packs(limit=4)
 
     html = f"""<!DOCTYPE html>
 <html lang="en" class="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nexus Omni-Dropship & POD Operations Hub</title>
+  <title>Nexus Omni-Dropship & Multi-Store Growth Hub</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
   <script>
@@ -197,7 +260,7 @@ async def dashboard_view():
             sans: ['Plus Jakarta Sans', 'sans-serif'],
           }},
           colors: {{
-            brand: {{ 900: '#06090e', 850: '#0b1017', 800: '#121924', border: '#1c2636', accent: '#00f2fe', green: '#00e676', amber: '#ffab00', rose: '#ff1744' }}
+            brand: {{ 900: '#06090e', 850: '#0b1017', 800: '#121924', border: '#1c2636', accent: '#00f2fe', green: '#00e676', amber: '#ffab00', rose: '#ff1744', purple: '#b388ff' }}
           }}
         }}
       }}
@@ -209,20 +272,23 @@ async def dashboard_view():
   <header class="border-b border-brand-border bg-brand-850/90 backdrop-blur-md sticky top-0 z-30">
     <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
       <div class="flex items-center space-x-3">
-        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-accent to-brand-green flex items-center justify-center font-bold text-black font-mono text-lg shadow-lg">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-brand-accent via-brand-purple to-brand-green flex items-center justify-center font-bold text-black font-mono text-lg shadow-lg">
           ⚡
         </div>
         <div>
-          <span class="font-extrabold text-white text-base font-mono tracking-tight">NEXUS OMNI-DROPSHIP & POD</span>
-          <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-brand-green/10 border border-brand-green/30 text-brand-green ml-2">100% AUTONOMOUS</span>
+          <span class="font-extrabold text-white text-base font-mono tracking-tight">NEXUS OMNI-GROWTH ENGINE</span>
+          <span class="text-[10px] font-mono px-2 py-0.5 rounded-full bg-brand-green/10 border border-brand-green/30 text-brand-green ml-2">MULTI-STORE & VIRAL GROWTH</span>
         </div>
       </div>
       <div class="flex items-center space-x-3 text-xs font-mono">
-        <button onclick="triggerSimulateOrder()" class="px-3 py-1.5 rounded-lg bg-brand-accent text-black font-bold hover:opacity-90 transition shadow">
-          + Simulate Order
+        <button onclick="triggerGrowthCycle()" class="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-brand-accent to-brand-green text-black font-extrabold hover:opacity-90 transition shadow-lg">
+          🚀 Run Autonomous Growth
+        </button>
+        <button onclick="triggerSimulateOrder()" class="px-3 py-1.5 rounded-lg bg-brand-800 border border-brand-border text-slate-200 hover:text-white transition">
+          + Order
         </button>
         <button onclick="triggerSync()" class="px-3 py-1.5 rounded-lg bg-brand-800 border border-brand-border text-slate-200 hover:text-white transition">
-          🔄 Sync Fulfillments
+          🔄 Sync
         </button>
       </div>
     </div>
@@ -230,118 +296,172 @@ async def dashboard_view():
 
   <main class="max-w-7xl mx-auto px-6 py-8 space-y-8">
     <!-- METRIC CARDS -->
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
-      <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 shadow-sm">
-        <span class="text-xs font-mono text-slate-400 uppercase tracking-wider">Gross Revenue</span>
-        <div class="text-2xl font-mono font-extrabold text-white mt-1">${metrics['gross_revenue']:.2f}</div>
-        <span class="text-[11px] font-mono text-brand-green mt-1 inline-block">From {metrics['total_orders']} orders</span>
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Gross Revenue</span>
+        <div class="text-xl font-mono font-extrabold text-white mt-1">${metrics['gross_revenue']:.2f}</div>
+        <span class="text-[10px] font-mono text-brand-green mt-1 inline-block">{metrics['total_orders']} orders</span>
       </div>
-      <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 shadow-sm">
-        <span class="text-xs font-mono text-slate-400 uppercase tracking-wider">Net Profit</span>
-        <div class="text-2xl font-mono font-extrabold text-brand-green mt-1">${metrics['net_profit']:.2f}</div>
-        <span class="text-[11px] font-mono text-slate-400 mt-1 inline-block">{metrics['profit_margin_pct']}% margin</span>
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Net Profit</span>
+        <div class="text-xl font-mono font-extrabold text-brand-green mt-1">${metrics['net_profit']:.2f}</div>
+        <span class="text-[10px] font-mono text-slate-400 mt-1 inline-block">{metrics['profit_margin_pct']}% margin</span>
       </div>
-      <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 shadow-sm">
-        <span class="text-xs font-mono text-slate-400 uppercase tracking-wider">Catalog Products</span>
-        <div class="text-2xl font-mono font-extrabold text-brand-accent mt-1">{metrics['total_products']}</div>
-        <span class="text-[11px] font-mono text-slate-400 mt-1 inline-block">CJ Dropship + Printify POD</span>
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Active Stores</span>
+        <div class="text-xl font-mono font-extrabold text-brand-accent mt-1">{len(stores)}</div>
+        <span class="text-[10px] font-mono text-slate-400 mt-1 inline-block">Multi-Niche Fleet</span>
       </div>
-      <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 shadow-sm">
-        <span class="text-xs font-mono text-slate-400 uppercase tracking-wider">Active Fulfillments</span>
-        <div class="text-2xl font-mono font-extrabold text-brand-amber mt-1">{metrics['active_fulfillments']}</div>
-        <span class="text-[11px] font-mono text-slate-400 mt-1 inline-block">In-flight at supplier hubs</span>
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Catalog Products</span>
+        <div class="text-xl font-mono font-extrabold text-white mt-1">{metrics['total_products']}</div>
+        <span class="text-[10px] font-mono text-slate-400 mt-1 inline-block">CJ + Printify POD</span>
       </div>
-    </div>
-
-    <!-- QUICK ACTIONS BANNER -->
-    <div class="bg-gradient-to-r from-brand-850 via-brand-800 to-brand-850 border border-brand-border rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4">
-      <div>
-        <h3 class="text-base font-bold text-white font-mono">Autonomous Production Engine Active</h3>
-        <p class="text-xs text-slate-400 font-mono mt-0.5">Webhook listening on <code>/webhooks/shopify/orders-paid</code>. Multi-supplier order routing & tracking active.</p>
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">SEO Articles</span>
+        <div class="text-xl font-mono font-extrabold text-brand-purple mt-1">{metrics['seo_articles_published']}</div>
+        <span class="text-[10px] font-mono text-slate-400 mt-1 inline-block">JSON-LD Indexed</span>
       </div>
-      <div class="flex items-center space-x-3 text-xs font-mono">
-        <button onclick="triggerSeedCatalog()" class="px-4 py-2 rounded-xl bg-brand-800 border border-brand-border text-slate-200 hover:text-white transition">
-          Seed Curated Catalog
-        </button>
-        <button onclick="triggerPublishAll()" class="px-4 py-2 rounded-xl bg-brand-green text-black font-bold hover:opacity-90 transition">
-          Publish All to Shopify
-        </button>
+      <div class="bg-brand-850 border border-brand-border rounded-2xl p-4 shadow-sm">
+        <span class="text-[10px] font-mono text-slate-400 uppercase tracking-wider">Creative Packs</span>
+        <div class="text-xl font-mono font-extrabold text-brand-amber mt-1">{metrics['creative_packs_generated']}</div>
+        <span class="text-[10px] font-mono text-slate-400 mt-1 inline-block">TikTok/Meta/Pin</span>
       </div>
     </div>
 
-    <!-- TABLES: ORDERS & PRODUCTS -->
+    <!-- STORE NETWORK STATUS -->
+    <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 space-y-4">
+      <div class="flex justify-between items-center">
+        <div>
+          <h3 class="text-sm font-bold font-mono text-white">Active Multi-Storefront Network</h3>
+          <p class="text-xs text-slate-400 font-mono">Cross-platform storefronts managed autonomously by Nexus.</p>
+        </div>
+        <button onclick="promptAddStore()" class="text-xs font-mono px-3 py-1.5 rounded-lg bg-brand-800 border border-brand-border text-brand-accent hover:text-white transition">
+          + Add Store
+        </button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {"".join([f'''
+        <div class="bg-brand-900 border border-brand-border/70 rounded-xl p-4 space-y-2">
+          <div class="flex justify-between items-start">
+            <span class="text-xs font-bold text-white font-mono">{s.name}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand-green/10 text-brand-green border border-brand-green/30">ONLINE</span>
+          </div>
+          <div class="text-[11px] font-mono text-slate-400 truncate">{s.shop_url}</div>
+          <div class="text-[11px] font-mono text-brand-accent">🎯 {s.target_niche}</div>
+          <div class="text-[10px] font-mono text-slate-500 pt-1 border-t border-brand-border/40 flex justify-between">
+            <span>Platform: {s.platform.value.upper()}</span>
+            <span>Currency: {s.currency}</span>
+          </div>
+        </div>
+        ''' for s in stores])}
+      </div>
+    </div>
+
+    <!-- VIRAL CREATIVES & PROGRAMMATIC SEO SECTION -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <!-- RECENT ORDERS -->
+      <!-- VIRAL CREATIVE PACKS -->
       <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 space-y-4">
         <div class="flex justify-between items-center">
-          <h3 class="text-sm font-bold font-mono text-white">Recent Customer Orders</h3>
-          <span class="text-xs font-mono text-slate-500">{len(orders)} total</span>
+          <h3 class="text-sm font-bold font-mono text-white">Viral Social Media Ad Packs (TikTok / Meta / Pinterest)</h3>
+          <span class="text-xs font-mono text-brand-accent">{len(creatives)} packs ready</span>
         </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-xs font-mono">
-            <thead class="border-b border-brand-border text-slate-400">
-              <tr>
-                <th class="pb-2">Order #</th>
-                <th class="pb-2">Customer</th>
-                <th class="pb-2">Revenue</th>
-                <th class="pb-2">Profit</th>
-                <th class="pb-2">Status</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-brand-border/50">
-              {"".join([f'''
-              <tr class="hover:bg-brand-800/40 transition">
-                <td class="py-2.5 font-bold text-white">#{o.shopify_order_number}</td>
-                <td class="py-2.5 text-slate-300 truncate max-w-[120px]">{o.customer_name}</td>
-                <td class="py-2.5 text-white">${o.total_revenue:.2f}</td>
-                <td class="py-2.5 text-brand-green font-bold">+${o.net_profit:.2f}</td>
-                <td class="py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand-accent/10 text-brand-accent border border-brand-accent/30">{o.status.value.upper()}</span></td>
-              </tr>
-              ''' for o in orders]) if orders else '<tr><td colspan="5" class="py-6 text-center text-slate-500">No customer orders recorded yet. Click "+ Simulate Order" to test.</td></tr>'}
-            </tbody>
-          </table>
+        <div class="space-y-3">
+          {"".join([f'''
+          <div class="bg-brand-900 border border-brand-border/60 rounded-xl p-3.5 space-y-2 text-xs font-mono">
+            <div class="flex justify-between items-center">
+              <b class="text-white truncate">{c.product_title}</b>
+              <span class="text-[10px] text-brand-amber font-bold">3-ACT SCRIPT READY</span>
+            </div>
+            <div class="text-[11px] text-slate-300 bg-brand-850 p-2.5 rounded border border-brand-border/40">
+              <span class="text-brand-accent font-bold">🎬 0-3s Hook:</span> "{c.tiktok_storyboard.get('hook_0_3s', {{}}).get('voiceover', '')}"<br>
+              <span class="text-brand-green font-bold">📢 Headline:</span> {c.meta_ad_copy.get('headline', '')}
+            </div>
+            <div class="text-[10px] text-slate-400 truncate">
+              Tags: {" ".join(c.tiktok_storyboard.get('hashtags', [])[:5])}
+            </div>
+          </div>
+          ''' for c in creatives]) if creatives else '<div class="py-6 text-center text-slate-500 text-xs font-mono">No ad packs generated yet. Click "Run Autonomous Growth" above.</div>'}
         </div>
       </div>
 
-      <!-- CATALOG PREVIEW -->
+      <!-- PROGRAMMATIC SEO ARTICLES -->
       <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 space-y-4">
         <div class="flex justify-between items-center">
-          <h3 class="text-sm font-bold font-mono text-white">Curated Product Catalog</h3>
-          <span class="text-xs font-mono text-slate-500">{len(products)} products</span>
+          <h3 class="text-sm font-bold font-mono text-white">Programmatic SEO Articles & Google Rich Snippets</h3>
+          <span class="text-xs font-mono text-brand-purple">{len(seo_articles)} articles</span>
         </div>
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-xs font-mono">
-            <thead class="border-b border-brand-border text-slate-400">
-              <tr>
-                <th class="pb-2">Product</th>
-                <th class="pb-2">Supplier</th>
-                <th class="pb-2">Cost / Retail</th>
-                <th class="pb-2">Variants</th>
-                <th class="pb-2">Shopify</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-brand-border/50">
-              {"".join([f'''
-              <tr class="hover:bg-brand-800/40 transition">
-                <td class="py-2.5 font-bold text-white truncate max-w-[160px]">{p.title}</td>
-                <td class="py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand-800 border border-brand-border text-slate-300">{p.supplier_type.value}</span></td>
-                <td class="py-2.5 text-slate-300">${p.variants[0].cost_price:.2f} / <b class="text-white">${p.variants[0].retail_price:.2f}</b></td>
-                <td class="py-2.5 text-slate-400">{len(p.variants)}</td>
-                <td class="py-2.5 font-mono text-[10px] text-brand-green">{'PUBLISHED' if p.is_published else 'LOCAL'}</td>
-              </tr>
-              ''' for p in products]) if products else '<tr><td colspan="5" class="py-6 text-center text-slate-500">Catalog is empty. Click "Seed Curated Catalog" above.</td></tr>'}
-            </tbody>
-          </table>
+        <div class="space-y-3">
+          {"".join([f'''
+          <div class="bg-brand-900 border border-brand-border/60 rounded-xl p-3.5 space-y-2 text-xs font-mono">
+            <div class="flex justify-between items-center">
+              <b class="text-white truncate max-w-[280px]">{a.title}</b>
+              <span class="text-[10px] text-brand-green font-bold">{'INDEXED & LIVE' if a.is_published else 'DRAFT'}</span>
+            </div>
+            <div class="text-[11px] text-slate-400 truncate">{a.meta_description}</div>
+            <div class="text-[10px] text-brand-accent flex justify-between items-center pt-1 border-t border-brand-border/40">
+              <span>Keywords: {", ".join(a.target_keywords[:3])}</span>
+              <span>Schema: JSON-LD (FAQ+Product)</span>
+            </div>
+          </div>
+          ''' for a in seo_articles]) if seo_articles else '<div class="py-6 text-center text-slate-500 text-xs font-mono">No SEO articles published yet. Click "Run Autonomous Growth" above.</div>'}
         </div>
+      </div>
+    </div>
+
+    <!-- RECENT ORDERS -->
+    <div class="bg-brand-850 border border-brand-border rounded-2xl p-5 space-y-4">
+      <div class="flex justify-between items-center">
+        <h3 class="text-sm font-bold font-mono text-white">Recent Customer Orders</h3>
+        <span class="text-xs font-mono text-slate-500">{len(orders)} total</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-left text-xs font-mono">
+          <thead class="border-b border-brand-border text-slate-400">
+            <tr>
+              <th class="pb-2">Order #</th>
+              <th class="pb-2">Customer</th>
+              <th class="pb-2">Revenue</th>
+              <th class="pb-2">Profit</th>
+              <th class="pb-2">Status</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-brand-border/50">
+            {"".join([f'''
+            <tr class="hover:bg-brand-800/40 transition">
+              <td class="py-2.5 font-bold text-white">#{o.shopify_order_number}</td>
+              <td class="py-2.5 text-slate-300 truncate max-w-[140px]">{o.customer_name}</td>
+              <td class="py-2.5 text-white">${o.total_revenue:.2f}</td>
+              <td class="py-2.5 text-brand-green font-bold">+${o.net_profit:.2f}</td>
+              <td class="py-2.5"><span class="px-2 py-0.5 rounded text-[10px] font-bold bg-brand-accent/10 text-brand-accent border border-brand-accent/30">{o.status.value.upper()}</span></td>
+            </tr>
+            ''' for o in orders]) if orders else '<tr><td colspan="5" class="py-6 text-center text-slate-500">No customer orders recorded yet. Click "+ Order" to simulate.</td></tr>'}
+          </tbody>
+        </table>
       </div>
     </div>
   </main>
 
   <footer class="border-t border-brand-border bg-brand-850/40 py-6 text-center text-xs font-mono text-slate-500">
-    Nexus Omni-Dropship & POD Engine • Built autonomously by <a href="https://sunzzx.github.io/ayush-kandwal-portfolio/" class="text-slate-400 hover:text-white">Ayush Kandwal (@Sunzzx)</a>
+    Nexus Omni-Dropship & Multi-Store Growth Hub • Built autonomously by <a href="https://sunzzx.github.io/ayush-kandwal-portfolio/" class="text-slate-400 hover:text-white">Ayush Kandwal (@Sunzzx)</a>
   </footer>
 
   <script>
+    async function triggerGrowthCycle() {{
+      const btn = event.target;
+      btn.textContent = "⏳ Running Growth Loop...";
+      btn.disabled = true;
+      try {{
+        const res = await fetch('/api/growth/execute', {{ method: 'POST' }});
+        const data = await res.json();
+        alert('🎉 Growth Cycle Complete! Seeded: ' + data.summary.products_seeded + ', SEO Articles: ' + data.summary.seo_articles_published + ', Creatives: ' + data.summary.creative_packs_synthesized);
+        window.location.reload();
+      }} catch (e) {{
+        alert('Growth cycle triggered.');
+        window.location.reload();
+      }}
+    }}
+
     async function triggerSimulateOrder() {{
       const res = await fetch('/api/orders/simulate', {{ method: 'POST' }});
       const data = await res.json();
@@ -356,17 +476,18 @@ async def dashboard_view():
       window.location.reload();
     }}
 
-    async function triggerSeedCatalog() {{
-      const res = await fetch('/api/catalog/seed', {{ method: 'POST' }});
-      const data = await res.json();
-      alert('✓ Catalog seeded with ' + data.seeded_products + ' curated winning products');
-      window.location.reload();
-    }}
-
-    async function triggerPublishAll() {{
-      const res = await fetch('/api/catalog/publish-all', {{ method: 'POST' }});
-      const data = await res.json();
-      alert('✓ Published ' + data.published_count + ' products to Shopify');
+    async function promptAddStore() {{
+      const name = prompt("Store Name (e.g. Apex Streetwear):");
+      if (!name) return;
+      const url = prompt("Shopify Store URL (e.g. https://apex-streetwear.myshopify.com):");
+      if (!url) return;
+      const niche = prompt("Target Niche (e.g. Urban Streetwear):", "Streetwear");
+      const res = await fetch('/api/stores', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify({{ name: name, shop_url: url, target_niche: niche }})
+      }});
+      alert("✓ Store registered successfully into Nexus!");
       window.location.reload();
     }}
   </script>
